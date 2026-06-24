@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 3,
+    "address": 5,
     "nonce": 0,
     "mux_id": 0
   },
@@ -20,7 +20,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
                 },
                 {
-                  "u32": 30
+                  "u32": 200
                 }
               ]
             }
@@ -29,6 +29,9 @@
         }
       ]
     ],
+    [],
+    [],
+    [],
     []
   ],
   "ledger": {
@@ -91,6 +94,33 @@
             "contract_data": {
               "ext": "v0",
               "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "UniqueFunder"
+                  },
+                  {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "bool": true
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
               "key": "ledger_key_contract_instance",
               "durability": "persistent",
               "val": {
@@ -108,7 +138,7 @@
                         ]
                       },
                       "val": {
-                        "i128": "0"
+                        "i128": "120"
                       }
                     },
                     {
@@ -132,7 +162,7 @@
                         ]
                       },
                       "val": {
-                        "u32": 30
+                        "u32": 200
                       }
                     },
                     {
@@ -144,7 +174,7 @@
                         ]
                       },
                       "val": {
-                        "u64": "0"
+                        "u64": "3"
                       }
                     },
                     {
@@ -156,7 +186,7 @@
                         ]
                       },
                       "val": {
-                        "i128": "0"
+                        "i128": "6000"
                       }
                     },
                     {
@@ -168,7 +198,7 @@
                         ]
                       },
                       "val": {
-                        "u64": "0"
+                        "u64": "1"
                       }
                     },
                     {
