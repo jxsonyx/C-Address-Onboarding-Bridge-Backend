@@ -11,3 +11,4 @@ coverage/
 .claude/
 .idea/
 .vscode/
+contracts/onboarding-bridge/test_snapshots/
