@@ -163,6 +163,21 @@ Fees are calculated in basis points (1 bps = 0.01%):
 
 ---
 
+## API Versioning
+
+The API now supports URL-based versioning and Accept header versioning. Version negotiation is handled by the middleware and returns standard deprecation headers on v1 responses.
+
+- `v1`: current stable endpoint family with deprecation headers and a sunset date
+- `v2`: compatible successor endpoints that can coexist with `v1`
+- `alpha -> beta -> stable -> deprecated -> sunset`: lifecycle is documented in the changelog below
+
+### Version Lifecycle and Changelog
+
+| Version | Status | Notes |
+|---------|--------|-------|
+| `v1` | deprecated | Legacy endpoints with deprecation and sunset headers |
+| `v2` | beta | Newer routing surface with version negotiation support |
+
 ## API Reference
 
 ### `GET /api/v1/quote`

@@ -27,6 +27,36 @@ describe('API E2E', () => {
     expect(res.body).toHaveProperty('timestamp');
   });
 
+  it('accept header versioning routes to v2 when requested', async () => {
+    const res = await request(app)
+      .get('/api/quote')
+      .query({
+        sourceAsset: 'XLM',
+        amount: '1000',
+        targetAddress: 'CABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVW',
+      })
+      .set('X-API-Key', 'test-api-key-123')
+      .set('Accept', 'application/vnd.bridge+json; version=2');
+
+    expect(res.status).toBe(200);
+    expect(res.headers['x-api-version']).toBe('v2');
+  });
+
+  it('v1 endpoints expose deprecation headers', async () => {
+    const res = await request(app)
+      .get('/api/v1/quote')
+      .query({
+        sourceAsset: 'XLM',
+        amount: '1000',
+        targetAddress: 'CABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVW',
+      })
+      .set('X-API-Key', 'test-api-key-123');
+
+    expect(res.status).toBe(200);
+    expect(res.headers.deprecation).toBe('true');
+    expect(res.headers['x-api-version']).toBe('v1');
+  });
+
   it('GET /api/v1/quote returns fee quote for authed request', async () => {
     const res = await request(app)
       .get('/api/v1/quote')

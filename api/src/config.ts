@@ -30,10 +30,9 @@ export const config = {
   },
   apiKeys: (process.env.API_KEYS || '').split(',').filter(Boolean),
   logLevel: process.env.LOG_LEVEL || 'info',
-  webhook: {
-    signingSecret: process.env.WEBHOOK_SIGNING_SECRET || 'default-dev-secret-change-in-production',
-  },
-  explorer: {
-    primary: (process.env.STELLAR_EXPLORER || 'stellarexpert') as 'stellarexpert' | 'stellarchain' | 'sorobanexplorer',
+  rateLimit: {
+    redisEnabled: process.env.REDIS_RATE_LIMIT === 'true',
+    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10),
+    burstFactor: parseInt(process.env.RATE_LIMIT_BURST_FACTOR || '2', 10),
   },
 };

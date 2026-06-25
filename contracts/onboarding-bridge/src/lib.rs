@@ -1,3 +1,55 @@
+//! # Onboarding Bridge — Soroban Smart Contract
+//!
+//! Routes funds from G-addresses and CEX withdrawals directly into Soroban
+//! smart accounts (C-addresses), removing the requirement for users to hold a
+//! traditional Stellar account before interacting with Soroban dApps.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! G-Address / CEX  ──▶  OnboardingBridge  ──▶  C-Address (target)
+//!                              │
+//!                        fee deducted
+//!                              │
+//!                       AccumulatedFees
+//! ```
+//!
+//! The contract itself does **not** move tokens; callers perform the actual
+//! token transfer off-chain (or via a separate SAC call) and invoke
+//! [`OnboardingBridge::fund_c_address`] to record the event and accrue fees.
+//!
+//! ## Fee Model
+//!
+//! Fees are expressed in **basis points** (bps), where 1 bps = 0.01 %.
+//!
+//! ```text
+//! fee_amount = floor(amount × fee_bps / 10_000)
+//! net_amount = amount − fee_amount
+//! ```
+//!
+//! Fees accumulate in [`DataKey::AccumulatedFees`] and can be withdrawn via
+//! `withdraw_fees` (admin, single or multi-recipient) or
+//! automatically via `trigger_auto_withdraw` (permissionless,
+//! fires when accumulated ≥ threshold).
+//!
+//! Multi-recipient splits are configured through
+//! `set_fee_recipients`; each recipient's share must be
+//! given in bps and all shares must sum to exactly 10 000.  The **last**
+//! recipient always receives the remainder to absorb integer-division dust.
+//!
+//! ## Storage Layout
+//!
+//! All keys live in **instance** storage (contract lifetime):
+//!
+//! | Key                    | Type            | Description                         |
+//! |------------------------|-----------------|-------------------------------------|
+//! | `Admin`                | `Address`       | Contract administrator              |
+//! | `FeeBps`               | `u32`           | Current fee rate (0–10 000)         |
+//! | `AccumulatedFees`      | `i128`          | Total unclaimed fees (stroops)      |
+//! | `Version`              | `u32`           | Contract schema version             |
+//! | `FeeRecipients`        | `Vec<FeeRecipient>` | Optional multi-recipient split  |
+//! | `AutoWithdrawThreshold`| `i128`          | Auto-withdraw trigger level; 0 = off|
+
 #![no_std]
 #![allow(deprecated)]
 #![allow(clippy::needless_borrows_for_generic_args)]
@@ -15,16 +67,25 @@ const ERR_REENTRANT_CALL: &str = "reentrant call detected";
 const ERR_EMPTY_BATCH: &str = "batch inputs must not be empty";
 const ERR_MISMATCHED_LENGTHS: &str = "batch input vectors must have same length";
 const ERR_NO_ENTRIES_TO_ARCHIVE: &str = "no entries to archive";
+const ERR_ADMIN_CANNOT_BE_CONTRACT: &str = "admin address cannot be the contract address";
 
+/// Storage keys used throughout the contract.
+///
+/// Every variant maps to a distinct slot in instance storage.
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     FeeBps,
     MaxFeeBps,
     AccumulatedFees,
+    /// Logical contract version (user-visible, incremented on each upgrade).
     Version,
     Paused,
     Admins,
+    InitializationParams,
+    FeeTokenWhitelist(Address),
+    FeeTokenRate(Address),
+    AccumulatedFeesByToken(Address),
     Threshold,
     ProposalNonce,
     Proposal(u32),
@@ -59,9 +120,20 @@ pub struct FundingRecord {
 #[derive(Clone)]
 pub enum ProposalAction {
     SetFee(u32),
+    SetFeeTokenWhitelist(Address, bool),
+    SetFeeTokenRate(Address, u32),
     WithdrawFees(Address, Address, i128),
     Pause,
     Unpause,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct InitializationParams {
+    pub threshold: u32,
+    pub fee_bps: u32,
+    pub max_fee_bps: u32,
+    pub admin_count: u32,
 }
 
 #[contracttype]
@@ -122,6 +194,14 @@ impl OnboardingBridge {
         }
     }
 
+    fn validate_admins(env: &Env, admins: &Vec<Address>) {
+        let contract_address = env.current_contract_address();
+        for i in 0..admins.len() {
+            let admin = admins.get_unchecked(i);
+            assert!(admin != contract_address, "{}", ERR_ADMIN_CANNOT_BE_CONTRACT);
+        }
+    }
+
     pub fn is_valid_c_address(_env: Env, target: Address) -> bool {
         Self::is_contract_address(&target)
     }
@@ -158,7 +238,7 @@ impl OnboardingBridge {
         max_amount: i128,
     ) {
         if env.storage().instance().has(&DataKey::Version) {
-            panic!("already initialized");
+            return;
         }
         assert!(!admins.is_empty(), "admins must not be empty");
         assert!(threshold > 0, "threshold must be > 0");
@@ -176,10 +256,17 @@ impl OnboardingBridge {
             .instance()
             .set(&DataKey::MaxFeeBps, &max_fee_bps);
         env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
-        env.storage()
-            .instance()
-            .set(&DataKey::AccumulatedFees, &0i128);
+        env.storage().instance().set(&DataKey::AccumulatedFees, &0i128);
         env.storage().instance().set(&DataKey::Version, &1u32);
+        env.storage().instance().set(
+            &DataKey::InitializationParams,
+            &InitializationParams {
+                threshold,
+                fee_bps,
+                max_fee_bps,
+                admin_count: admins.len(),
+            },
+        );
         env.storage().instance().set(&DataKey::FundingCount, &0u32);
         env.storage().instance().set(&DataKey::NextArchiveId, &0u32);
         env.storage().instance().set(&DataKey::Paused, &false);
@@ -204,14 +291,55 @@ impl OnboardingBridge {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Getters
+    // -----------------------------------------------------------------------
+
     pub fn version(env: Env) -> u32 {
         Self::extend_ttl(&env);
         env.storage().instance().get(&DataKey::Version).unwrap_or(0)
     }
 
+    pub fn contract_address(env: Env) -> Address {
+        env.current_contract_address()
+    }
+
+    pub fn initialization_params(env: Env) -> InitializationParams {
+        env.storage()
+            .instance()
+            .get(&DataKey::InitializationParams)
+            .unwrap_or(InitializationParams {
+                threshold: 0,
+                fee_bps: 0,
+                max_fee_bps: 0,
+                admin_count: 0,
+            })
+    }
+
     pub fn fee_bps(env: Env) -> u32 {
         Self::extend_ttl(&env);
         env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0)
+    }
+
+    pub fn is_fee_token_whitelisted(env: Env, token_address: Address) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::FeeTokenWhitelist(token_address))
+            .unwrap_or(false)
+    }
+
+    pub fn fee_token_rate(env: Env, token_address: Address) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::FeeTokenRate(token_address))
+            .unwrap_or(10000)
+    }
+
+    pub fn accumulated_fees_for_token(env: Env, token_address: Address) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::AccumulatedFeesByToken(token_address))
+            .unwrap_or(0)
     }
 
     pub fn max_fee_bps(env: Env) -> u32 {
@@ -246,6 +374,17 @@ impl OnboardingBridge {
         rebate_bps(&env, &user)
     }
 
+    /// Returns the total unclaimed fees accumulated in the contract (stroops).
+    ///
+    /// # Returns
+    ///
+    /// Running fee balance as `i128`, or `0` if none have been collected.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let fees = contract.accumulated_fees(env);
+    /// ```
     pub fn accumulated_fees(env: Env) -> i128 {
         Self::extend_ttl(&env);
         env.storage()
@@ -374,6 +513,20 @@ impl OnboardingBridge {
             env.storage()
                 .instance()
                 .set(&DataKey::AccumulatedFees, &(accumulated + fee));
+
+            if Self::is_fee_token_whitelisted(env.clone(), token_address.clone()) {
+                let token_fee_rate = Self::fee_token_rate(env.clone(), token_address.clone());
+                let token_fee = (fee * token_fee_rate as i128) / 10000;
+                let token_accumulated: i128 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::AccumulatedFeesByToken(token_address.clone()))
+                    .unwrap_or(0);
+                env.storage().instance().set(
+                    &DataKey::AccumulatedFeesByToken(token_address.clone()),
+                    &(token_accumulated + token_fee),
+                );
+            }
         }
         tk.transfer(&env.current_contract_address(), target, &net_amount);
 
@@ -458,6 +611,37 @@ impl OnboardingBridge {
         (total_fees, count)
     }
 
+    /// Route a CEX withdrawal to a C-address.
+    ///
+    /// Convenience wrapper around `fund_c_address` that requires the calling
+    /// exchange address to authorise the transaction, then delegates all fee
+    /// logic and event emission to `fund_c_address`.
+    ///
+    /// # Parameters
+    ///
+    /// - `exchange` — Authorised exchange address initiating the withdrawal.
+    /// - `target` — Destination C-address.
+    /// - `token_address` — Token being transferred.
+    /// - `amount` — Gross transfer amount.
+    /// - `memo` — Memo for off-chain tracking (format: `bridge:{exchange}:{suffix}`).
+    ///
+    /// # Returns
+    ///
+    /// Fee amount deducted (see `fund_c_address`).
+    ///
+    /// # Panics
+    ///
+    /// - Auth failure — if the transaction is not signed by `exchange`.
+    ///
+    /// # Events
+    ///
+    /// Emits `("funded",) → (exchange, target, amount, fee_amount)` (via `fund_c_address`).
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let fee = contract.route_from_exchange(env, exchange, target, token, 10_000_000, memo);
+    /// ```
     pub fn route_from_exchange(
         env: Env,
         exchange: Address,
@@ -712,6 +896,26 @@ impl OnboardingBridge {
                 env.storage().instance().set(&DataKey::FeeBps, &new_fee_bps);
                 env.events()
                     .publish((Symbol::new(&env, "set_fee"),), (new_fee_bps,));
+                0i128
+            }
+            ProposalAction::SetFeeTokenWhitelist(token, enabled) => {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::FeeTokenWhitelist(token.clone()), &enabled);
+                env.events().publish(
+                    (Symbol::new(&env, "set_fee_token_whitelist"),),
+                    (token, enabled),
+                );
+                0i128
+            }
+            ProposalAction::SetFeeTokenRate(token, rate) => {
+                assert!(rate >= 1000, "rate must be >= 1000");
+                assert!(rate <= 20000, "rate must be <= 20000");
+                env.storage().instance().set(&DataKey::FeeTokenRate(token.clone()), &rate);
+                env.events().publish(
+                    (Symbol::new(&env, "set_fee_token_rate"),),
+                    (token, rate),
+                );
                 0i128
             }
             ProposalAction::WithdrawFees(to, token, amount) => {
