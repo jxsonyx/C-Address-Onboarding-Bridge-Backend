@@ -1,8 +1,9 @@
 #![no_std]
 #![allow(deprecated)]
+#![allow(clippy::needless_borrows_for_generic_args)]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, String, Symbol,
+    contract, contractimpl, contracttype, token, Address, BytesN, Env, String, Symbol,
 };
 
 // ---------------------------------------------------------------------------
@@ -76,15 +77,12 @@ fn assert_not_paused(env: &Env) {
     );
 }
 
-fn make_op_hash(env: &Env, label: &str) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    for byte in label.as_bytes() {
-        b.push_back(*byte);
-    }
-    env.crypto().sha256(&b)
+fn make_op_hash(env: &Env, label: &String) -> BytesN<32> {
+    let b = label.to_bytes();
+    env.crypto().sha256(&b).into()
 }
 
-fn propose(env: &Env, label: &str) -> (BytesN<32>, u64) {
+fn propose(env: &Env, label: &String) -> (BytesN<32>, u64) {
     let delay: u64 = env
         .storage()
         .instance()
@@ -103,7 +101,7 @@ fn propose(env: &Env, label: &str) -> (BytesN<32>, u64) {
     (hash, ready_at)
 }
 
-fn assert_op_ready(env: &Env, label: &str) {
+fn assert_op_ready(env: &Env, label: &String) {
     let hash = make_op_hash(env, label);
     let op: PendingOperation = env
         .storage()
@@ -261,7 +259,7 @@ impl OnboardingBridge {
 
     pub fn propose_op(env: Env, label: String) -> (BytesN<32>, u64) {
         require_admin(&env);
-        let (hash, ready_at) = propose(&env, label.to_string().as_str());
+        let (hash, ready_at) = propose(&env, &label);
         env.events().publish(
             (Symbol::new(&env, "op_proposed"),),
             (hash.clone(), ready_at),
@@ -291,7 +289,7 @@ impl OnboardingBridge {
 
     pub fn propose_set_fee(env: Env, op_label: String) -> (BytesN<32>, u64) {
         require_admin(&env);
-        let (hash, ready_at) = propose(&env, op_label.to_string().as_str());
+        let (hash, ready_at) = propose(&env, &op_label);
         env.events().publish(
             (Symbol::new(&env, "fee_proposed"),),
             (hash.clone(), ready_at),
@@ -302,7 +300,7 @@ impl OnboardingBridge {
     pub fn execute_set_fee(env: Env, new_fee_bps: u32, op_label: String) {
         require_admin(&env);
         assert!(new_fee_bps <= 10000, "fee_bps must be <= 10000");
-        assert_op_ready(&env, op_label.to_string().as_str());
+        assert_op_ready(&env, &op_label);
         env.storage().instance().set(&DataKey::FeeBps, &new_fee_bps);
         env.events()
             .publish((Symbol::new(&env, "set_fee"),), (new_fee_bps,));
@@ -340,14 +338,14 @@ impl OnboardingBridge {
 
     pub fn propose_set_min(env: Env, op_label: String) -> (BytesN<32>, u64) {
         require_admin(&env);
-        let (hash, ready_at) = propose(&env, op_label.to_string().as_str());
+        let (hash, ready_at) = propose(&env, &op_label);
         (hash, ready_at)
     }
 
     pub fn execute_set_min(env: Env, min: i128, op_label: String) {
         require_admin(&env);
         assert!(min >= 1, "min_amount >= 1");
-        assert_op_ready(&env, op_label.to_string().as_str());
+        assert_op_ready(&env, &op_label);
         let max: i128 = env
             .storage()
             .instance()
@@ -361,14 +359,14 @@ impl OnboardingBridge {
 
     pub fn propose_set_max(env: Env, op_label: String) -> (BytesN<32>, u64) {
         require_admin(&env);
-        let (hash, ready_at) = propose(&env, op_label.to_string().as_str());
+        let (hash, ready_at) = propose(&env, &op_label);
         (hash, ready_at)
     }
 
     pub fn execute_set_max(env: Env, max: i128, op_label: String) {
         require_admin(&env);
         assert!(max >= 1, "max_amount >= 1");
-        assert_op_ready(&env, op_label.to_string().as_str());
+        assert_op_ready(&env, &op_label);
         let min: i128 = env
             .storage()
             .instance()
@@ -507,7 +505,6 @@ impl OnboardingBridge {
         amount: i128,
         memo: String,
     ) -> i128 {
-        exchange.require_auth();
         Self::fund_c_address(env, exchange, target, token_address, amount, memo)
     }
 }
