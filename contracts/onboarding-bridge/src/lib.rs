@@ -1,7 +1,9 @@
 #![no_std]
+#![allow(deprecated)]
+#![allow(clippy::needless_borrows_for_generic_args)]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, crypto::Hash, Address, Bytes, BytesN, Env, String,
+    contract, contractimpl, contracttype, crypto::Hash, token, Address, Bytes, BytesN, Env, String,
     Symbol, Vec,
 };
 
@@ -33,6 +35,12 @@ pub enum DataKey {
     FundingCount,
     ArchivedHash(u32),
     NextArchiveId,
+    MinAmount,
+    MaxAmount,
+    UserVolume(Address),
+    TierThreshold(u32),
+    TierDiscount(u32),
+    TierCount,
 }
 
 #[contracttype]
@@ -70,6 +78,36 @@ pub struct Proposal {
 
 #[contract]
 pub struct OnboardingBridge;
+
+fn rebate_bps(env: &Env, user: &Address) -> u32 {
+    let volume: i128 = env
+        .storage()
+        .instance()
+        .get(&DataKey::UserVolume(user.clone()))
+        .unwrap_or(0);
+    let tier_count: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::TierCount)
+        .unwrap_or(0);
+    let mut best: u32 = 0;
+    for i in 0..tier_count {
+        let threshold: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TierThreshold(i))
+            .unwrap_or(0);
+        let discount: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TierDiscount(i))
+            .unwrap_or(0);
+        if volume >= threshold && discount > best {
+            best = discount;
+        }
+    }
+    best
+}
 
 #[contractimpl]
 impl OnboardingBridge {
@@ -117,6 +155,8 @@ impl OnboardingBridge {
         threshold: u32,
         fee_bps: u32,
         max_fee_bps: u32,
+        min_amount: i128,
+        max_amount: i128,
     ) {
         if env.storage().instance().has(&DataKey::Version) {
             panic!("already initialized");
@@ -126,6 +166,8 @@ impl OnboardingBridge {
         assert!(threshold <= admins.len(), "threshold exceeds admin count");
         assert!(max_fee_bps <= 10000, "max_fee_bps must be <= 10000");
         assert!(fee_bps <= max_fee_bps, "fee_bps must be <= max_fee_bps");
+        assert!(min_amount > 0, "min_amount must be > 0");
+        assert!(max_amount >= min_amount, "max_amount must be >= min_amount");
 
         env.storage().instance().set(&DataKey::Admins, &admins);
         env.storage()
@@ -141,10 +183,23 @@ impl OnboardingBridge {
         env.storage().instance().set(&DataKey::NextArchiveId, &0u32);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.storage().instance().set(&DataKey::ProposalNonce, &0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinAmount, &min_amount);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxAmount, &max_amount);
 
         env.events().publish(
             (Symbol::new(&env, "initialize"),),
-            (admins, threshold, fee_bps, max_fee_bps),
+            (
+                admins,
+                threshold,
+                fee_bps,
+                max_fee_bps,
+                min_amount,
+                max_amount,
+            ),
         );
     }
 
@@ -167,6 +222,31 @@ impl OnboardingBridge {
             .instance()
             .get(&DataKey::MaxFeeBps)
             .unwrap_or(0)
+    }
+
+    pub fn min_amount(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MinAmount)
+            .unwrap_or(1)
+    }
+
+    pub fn max_amount(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxAmount)
+            .unwrap_or(i128::MAX)
+    }
+
+    pub fn user_volume(env: Env, user: Address) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::UserVolume(user))
+            .unwrap_or(0)
+    }
+
+    pub fn rebate_for(env: Env, user: Address) -> u32 {
+        rebate_bps(&env, &user)
     }
 
     pub fn accumulated_fees(env: Env) -> i128 {
@@ -196,6 +276,36 @@ impl OnboardingBridge {
             .instance()
             .get(&DataKey::Threshold)
             .expect("not initialized")
+    }
+
+    pub fn set_rebate_tier(env: Env, tier_index: u32, threshold: i128, discount_bps: u32) {
+        let admins: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admins)
+            .expect("not initialized");
+        admins.get_unchecked(0).require_auth();
+        assert!(discount_bps <= 5000, "discount capped at 50%");
+        env.storage()
+            .instance()
+            .set(&DataKey::TierThreshold(tier_index), &threshold);
+        env.storage()
+            .instance()
+            .set(&DataKey::TierDiscount(tier_index), &discount_bps);
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TierCount)
+            .unwrap_or(0);
+        if tier_index >= count {
+            env.storage()
+                .instance()
+                .set(&DataKey::TierCount, &(tier_index + 1));
+        }
+        env.events().publish(
+            (Symbol::new(&env, "tier_set"),),
+            (tier_index, threshold, discount_bps),
+        );
     }
 
     pub fn fund_c_address(
@@ -233,13 +343,31 @@ impl OnboardingBridge {
         amount: i128,
         memo: &String,
     ) -> i128 {
+        let min_amt: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinAmount)
+            .unwrap_or(1);
+        let max_amt: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxAmount)
+            .unwrap_or(i128::MAX);
+        assert!(amount >= min_amt, "amount below minimum");
+        assert!(amount <= max_amt, "amount above maximum");
+
         let fee_bps: u32 = env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0);
-        let fee = if fee_bps > 0 {
-            (amount * fee_bps as i128) / 10000
+        let discount = rebate_bps(env, source);
+        let effective_fee_bps = fee_bps.saturating_sub(fee_bps * discount / 10000);
+        let fee = if effective_fee_bps > 0 {
+            (amount * effective_fee_bps as i128) / 10000
         } else {
             0i128
         };
 
+        let net_amount = amount - fee;
+        let tk = token::Client::new(env, token_address);
+        tk.transfer(source, &env.current_contract_address(), &amount);
         if fee > 0 {
             let accumulated: i128 = env
                 .storage()
@@ -250,6 +378,11 @@ impl OnboardingBridge {
                 .instance()
                 .set(&DataKey::AccumulatedFees, &(accumulated + fee));
         }
+        tk.transfer(&env.current_contract_address(), target, &net_amount);
+
+        let vol_key = DataKey::UserVolume(source.clone());
+        let vol: i128 = env.storage().instance().get(&vol_key).unwrap_or(0);
+        env.storage().instance().set(&vol_key, &(vol + amount));
 
         let count: u32 = env
             .storage()
@@ -277,7 +410,7 @@ impl OnboardingBridge {
 
         env.events().publish(
             (Symbol::new(env, "funded"),),
-            (source.clone(), target.clone(), amount, fee),
+            (source.clone(), target.clone(), amount, fee, discount),
         );
 
         fee
@@ -599,6 +732,8 @@ impl OnboardingBridge {
                 env.storage()
                     .instance()
                     .set(&DataKey::AccumulatedFees, &remaining);
+                let tk = token::Client::new(&env, &token);
+                tk.transfer(&env.current_contract_address(), &to, &withdraw_amount);
                 env.events().publish(
                     (Symbol::new(&env, "withdrawn"),),
                     (to, token, withdraw_amount),
