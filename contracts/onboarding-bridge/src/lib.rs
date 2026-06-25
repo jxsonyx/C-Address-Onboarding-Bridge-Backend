@@ -1,7 +1,19 @@
 #![no_std]
 #![allow(deprecated)]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, crypto::Hash, Address, Bytes, BytesN, Env, String,
+    Symbol, Vec,
+};
+
+const TTL_THRESHOLD: u32 = 5000;
+const TTL_EXTEND: u32 = 50000;
+
+const ERR_INVALID_C_ADDRESS: &str = "invalid c-address: not a contract address";
+const ERR_REENTRANT_CALL: &str = "reentrant call detected";
+const ERR_EMPTY_BATCH: &str = "batch inputs must not be empty";
+const ERR_MISMATCHED_LENGTHS: &str = "batch input vectors must have same length";
+const ERR_NO_ENTRIES_TO_ARCHIVE: &str = "no entries to archive";
 
 #[contracttype]
 #[derive(Clone)]
@@ -16,6 +28,24 @@ pub enum DataKey {
     ProposalNonce,
     Proposal(u32),
     ProposalApproval(u32, Address),
+    ReentrancyGuard,
+    Funding(u32),
+    FundingCount,
+    ArchivedHash(u32),
+    NextArchiveId,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct FundingRecord {
+    source: Address,
+    target: Address,
+    token_address: Address,
+    amount: i128,
+    fee: i128,
+    ledger: u32,
+    memo: String,
+    archived: bool,
 }
 
 #[contracttype]
@@ -43,9 +73,43 @@ pub struct OnboardingBridge;
 
 #[contractimpl]
 impl OnboardingBridge {
-    // ------------------------------------------------------------------------
-    // Initialize
-    // ------------------------------------------------------------------------
+    fn is_contract_address(addr: &Address) -> bool {
+        let s = addr.to_string();
+        let bytes = s.to_bytes();
+        bytes.first() == Some(b'C')
+    }
+
+    fn validate_c_address(target: &Address) {
+        if !Self::is_contract_address(target) {
+            panic!("{}", ERR_INVALID_C_ADDRESS);
+        }
+    }
+
+    pub fn is_valid_c_address(_env: Env, target: Address) -> bool {
+        Self::is_contract_address(&target)
+    }
+
+    fn pre_reentrancy_check(env: &Env) {
+        if env.storage().temporary().has(&DataKey::ReentrancyGuard) {
+            panic!("{}", ERR_REENTRANT_CALL);
+        }
+    }
+
+    fn set_reentrancy_guard(env: &Env) {
+        env.storage()
+            .temporary()
+            .set(&DataKey::ReentrancyGuard, &true);
+    }
+
+    fn clear_reentrancy_guard(env: &Env) {
+        env.storage().temporary().remove(&DataKey::ReentrancyGuard);
+    }
+
+    fn extend_ttl(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
+    }
 
     pub fn initialize(
         env: Env,
@@ -75,6 +139,8 @@ impl OnboardingBridge {
             .instance()
             .set(&DataKey::AccumulatedFees, &0i128);
         env.storage().instance().set(&DataKey::Version, &1u32);
+        env.storage().instance().set(&DataKey::FundingCount, &0u32);
+        env.storage().instance().set(&DataKey::NextArchiveId, &0u32);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.storage().instance().set(&DataKey::ProposalNonce, &0u32);
 
@@ -84,15 +150,13 @@ impl OnboardingBridge {
         );
     }
 
-    // ------------------------------------------------------------------------
-    // View functions
-    // ------------------------------------------------------------------------
-
     pub fn version(env: Env) -> u32 {
+        Self::extend_ttl(&env);
         env.storage().instance().get(&DataKey::Version).unwrap_or(0)
     }
 
     pub fn fee_bps(env: Env) -> u32 {
+        Self::extend_ttl(&env);
         env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0)
     }
 
@@ -104,6 +168,7 @@ impl OnboardingBridge {
     }
 
     pub fn accumulated_fees(env: Env) -> i128 {
+        Self::extend_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::AccumulatedFees)
@@ -131,18 +196,17 @@ impl OnboardingBridge {
             .expect("not initialized")
     }
 
-    // ------------------------------------------------------------------------
-    // Core operations
-    // ------------------------------------------------------------------------
-
     pub fn fund_c_address(
         env: Env,
         source: Address,
         target: Address,
-        _token_address: Address,
+        token_address: Address,
         amount: i128,
-        _memo: String,
+        memo: String,
     ) -> i128 {
+        Self::extend_ttl(&env);
+        Self::pre_reentrancy_check(&env);
+        Self::validate_c_address(&target);
         assert!(amount > 0, "amount must be positive");
         if env
             .storage()
@@ -152,15 +216,29 @@ impl OnboardingBridge {
         {
             panic!("contract is paused");
         }
+        Self::set_reentrancy_guard(&env);
+        let result =
+            Self::fund_c_address_internal(&env, &source, &target, &token_address, amount, &memo);
+        Self::clear_reentrancy_guard(&env);
+        result
+    }
 
+    fn fund_c_address_internal(
+        env: &Env,
+        source: &Address,
+        target: &Address,
+        token_address: &Address,
+        amount: i128,
+        memo: &String,
+    ) -> i128 {
         let fee_bps: u32 = env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0);
-        let fee_amount = if fee_bps > 0 {
+        let fee = if fee_bps > 0 {
             (amount * fee_bps as i128) / 10000
         } else {
             0i128
         };
 
-        if fee_amount > 0 {
+        if fee > 0 {
             let accumulated: i128 = env
                 .storage()
                 .instance()
@@ -168,15 +246,84 @@ impl OnboardingBridge {
                 .unwrap_or(0);
             env.storage()
                 .instance()
-                .set(&DataKey::AccumulatedFees, &(accumulated + fee_amount));
+                .set(&DataKey::AccumulatedFees, &(accumulated + fee));
+        }
+
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::FundingCount)
+            .unwrap_or(0);
+        let id = count + 1;
+        let record = FundingRecord {
+            source: source.clone(),
+            target: target.clone(),
+            token_address: token_address.clone(),
+            amount,
+            fee,
+            ledger: env.ledger().sequence(),
+            memo: memo.clone(),
+            archived: false,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Funding(id), &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Funding(id), TTL_THRESHOLD, TTL_EXTEND);
+        env.storage().instance().set(&DataKey::FundingCount, &id);
+
+        env.events().publish(
+            (Symbol::new(env, "funded"),),
+            (source.clone(), target.clone(), amount, fee),
+        );
+
+        fee
+    }
+
+    pub fn batch_fund_c_address(
+        env: Env,
+        source: Address,
+        targets: Vec<Address>,
+        token_addresses: Vec<Address>,
+        amounts: Vec<i128>,
+        memos: Vec<String>,
+    ) -> (i128, u32) {
+        Self::extend_ttl(&env);
+        Self::pre_reentrancy_check(&env);
+        source.require_auth();
+
+        let count = targets.len();
+        assert!(count > 0, "{}", ERR_EMPTY_BATCH);
+        assert!(
+            token_addresses.len() == count && amounts.len() == count && memos.len() == count,
+            "{}",
+            ERR_MISMATCHED_LENGTHS
+        );
+
+        for i in 0..count {
+            Self::validate_c_address(&targets.get(i).unwrap());
+        }
+
+        Self::set_reentrancy_guard(&env);
+
+        let mut total_fees: i128 = 0;
+        for i in 0..count {
+            let target = targets.get(i).unwrap();
+            let token_addr = token_addresses.get(i).unwrap();
+            let amount = amounts.get(i).unwrap();
+            let memo = memos.get(i).unwrap();
+            total_fees +=
+                Self::fund_c_address_internal(&env, &source, &target, &token_addr, amount, &memo);
         }
 
         env.events().publish(
-            (Symbol::new(&env, "funded"),),
-            (source, target, amount, fee_amount),
+            (Symbol::new(&env, "batch_funded"),),
+            (source, count, total_fees),
         );
 
-        fee_amount
+        Self::clear_reentrancy_guard(&env);
+        (total_fees, count)
     }
 
     pub fn route_from_exchange(
@@ -187,7 +334,9 @@ impl OnboardingBridge {
         amount: i128,
         memo: String,
     ) -> i128 {
-        exchange.require_auth();
+        Self::extend_ttl(&env);
+        Self::pre_reentrancy_check(&env);
+        Self::validate_c_address(&target);
         assert!(amount > 0, "amount must be positive");
         if env
             .storage()
@@ -197,13 +346,109 @@ impl OnboardingBridge {
         {
             panic!("contract is paused");
         }
-
-        Self::fund_c_address(env, exchange, target, token_address, amount, memo)
+        exchange.require_auth();
+        Self::fund_c_address_internal(&env, &exchange, &target, &token_address, amount, &memo)
     }
 
-    // ------------------------------------------------------------------------
-    // Multisig governance
-    // ------------------------------------------------------------------------
+    pub fn funding_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::FundingCount)
+            .unwrap_or(0)
+    }
+
+    pub fn funding_record(env: Env, id: u32) -> Option<FundingRecord> {
+        env.storage().persistent().get(&DataKey::Funding(id))
+    }
+
+    pub fn archive_old_entries(env: Env, count: u32) -> BytesN<32> {
+        let admins: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admins)
+            .expect("not initialized");
+        if !admins.is_empty() {
+            admins.get_unchecked(0).require_auth();
+        }
+        Self::extend_ttl(&env);
+
+        let total: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::FundingCount)
+            .unwrap_or(0);
+        let archive_count = if count > total { total } else { count };
+        assert!(archive_count > 0, "{}", ERR_NO_ENTRIES_TO_ARCHIVE);
+
+        let mut buf: Vec<i128> = Vec::new(&env);
+        for i in 1..=archive_count {
+            if let Some(mut record) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, FundingRecord>(&DataKey::Funding(i))
+            {
+                record.archived = true;
+                buf.push_back(record.amount);
+                buf.push_back(record.fee);
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::Funding(i), &record);
+            }
+        }
+
+        let archive_id: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextArchiveId)
+            .unwrap_or(0);
+
+        let mut hash_bytes = Bytes::new(&env);
+        for i in 0..buf.len() {
+            let val = buf.get(i).unwrap();
+            let byte: u8 = (val & 0xFF) as u8;
+            hash_bytes.push_back(byte);
+        }
+        let hash: Hash<32> = env.crypto().sha256(&hash_bytes);
+        let hash_val: BytesN<32> = hash.to_bytes();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::ArchivedHash(archive_id), &hash_val);
+        env.storage().persistent().extend_ttl(
+            &DataKey::ArchivedHash(archive_id),
+            TTL_THRESHOLD,
+            TTL_EXTEND,
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::NextArchiveId, &(archive_id + 1));
+
+        env.events().publish(
+            (Symbol::new(&env, "archived"),),
+            (archive_count, hash_val.clone()),
+        );
+
+        hash_val
+    }
+
+    pub fn storage_usage(env: Env) -> (u32, u32, i128, u32) {
+        let funding_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::FundingCount)
+            .unwrap_or(0);
+        let archived_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextArchiveId)
+            .unwrap_or(0);
+        let accumulated_fees: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AccumulatedFees)
+            .unwrap_or(0);
+        (funding_count, archived_count, accumulated_fees, 5u32)
+    }
 
     pub fn propose(env: Env, proposer: Address, action: ProposalAction, expiry_blocks: u32) -> u32 {
         proposer.require_auth();
@@ -228,7 +473,6 @@ impl OnboardingBridge {
         let proposal_id = nonce + 1;
         let current_block = env.ledger().sequence();
 
-        // Auto-approve the proposer
         let approval_key = DataKey::ProposalApproval(proposal_id, proposer.clone());
         env.storage().instance().set(&approval_key, &true);
 

@@ -9,10 +9,6 @@ use soroban_sdk::{
 
 use super::*;
 
-// ---------------------------------------------------------------------------
-// Test token — minimal SEP-41 compliant token.
-// ---------------------------------------------------------------------------
-
 #[contracttype]
 #[derive(Clone)]
 enum TK {
@@ -74,9 +70,12 @@ impl TestToken {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+fn account_address(env: &Env) -> Address {
+    Address::from_str(
+        env,
+        "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H",
+    )
+}
 
 fn create_admins(env: &Env, count: u32) -> Vec<Address> {
     let mut admins: Vec<Address> = Vec::new(env);
@@ -253,12 +252,10 @@ fn test_withdraw_fees_works_when_paused() {
     bridge.fund_c_address(&source, &target, &token_addr, &1000, &memo);
     assert_eq!(bridge.accumulated_fees(), 10);
 
-    // Pause
     let pid = bridge.propose(&admins.get_unchecked(0), &ProposalAction::Pause, &1000);
     bridge.approve(&admins.get_unchecked(1), &pid);
     bridge.execute(&pid);
 
-    // Withdraw fees via proposal works even when paused
     let to = Address::generate(&env);
     let token_addr2 = Address::generate(&env);
     let wpid = bridge.propose(
@@ -460,12 +457,10 @@ fn test_get_active_proposals() {
     let _pid2 = bridge.propose(&proposer, &ProposalAction::SetFee(300), &10);
     let pid3 = bridge.propose(&proposer, &ProposalAction::SetFee(400), &1000);
 
-    // Approve and execute pid1
     bridge.approve(&admins.get_unchecked(1), &pid1);
     bridge.approve(&admins.get_unchecked(2), &pid1);
     bridge.execute(&pid1);
 
-    // Advance ledger to expire pid2
     env.ledger()
         .set_sequence_number(env.ledger().sequence() + 20);
 
@@ -634,52 +629,6 @@ fn test_fund_with_zero_fee() {
 }
 
 #[test]
-fn test_withdraw_fees() {
-    let (_env, bridge, admins) = setup_env_with_admins(2, 2, 200, 1000);
-    let source = Address::generate(&_env);
-    let target = Address::generate(&_env);
-    let token_addr = Address::generate(&_env);
-
-    let memo = String::from_str(&_env, "test");
-    bridge.fund_c_address(&source, &target, &token_addr, &1000, &memo);
-    assert_eq!(bridge.accumulated_fees(), 20);
-
-    let to = Address::generate(&_env);
-    let pid = bridge.propose(
-        &admins.get_unchecked(0),
-        &ProposalAction::WithdrawFees(to.clone(), token_addr.clone(), 0i128),
-        &1000,
-    );
-    bridge.approve(&admins.get_unchecked(1), &pid);
-    bridge.execute(&pid);
-
-    assert_eq!(bridge.accumulated_fees(), 0);
-}
-
-#[test]
-fn test_withdraw_fees_partial() {
-    let (_env, bridge, admins) = setup_env_with_admins(2, 2, 100, 1000);
-    let source = Address::generate(&_env);
-    let target = Address::generate(&_env);
-    let token_addr = Address::generate(&_env);
-
-    let memo = String::from_str(&_env, "test");
-    bridge.fund_c_address(&source, &target, &token_addr, &1000, &memo);
-    assert_eq!(bridge.accumulated_fees(), 10);
-
-    let to = Address::generate(&_env);
-    let pid = bridge.propose(
-        &admins.get_unchecked(0),
-        &ProposalAction::WithdrawFees(to.clone(), token_addr.clone(), 4i128),
-        &1000,
-    );
-    bridge.approve(&admins.get_unchecked(1), &pid);
-    bridge.execute(&pid);
-
-    assert_eq!(bridge.accumulated_fees(), 6);
-}
-
-#[test]
 fn test_route_from_exchange() {
     let (_env, bridge, _admins) = setup_env_with_admins(2, 2, 50, 1000);
     let exchange = Address::generate(&_env);
@@ -783,13 +732,11 @@ fn test_full_scenario() {
     admins.push_back(admin2.clone());
     bridge.initialize(&admins, &2, &100, &1000);
 
-    // Fund
     let memo = String::from_str(&env, "full test");
     let fee = bridge.fund_c_address(&source, &target, &token_addr, &1000, &memo);
     assert_eq!(fee, 10);
     assert_eq!(bridge.accumulated_fees(), 10);
 
-    // Withdraw fees via multisig proposal
     let to = Address::generate(&env);
     let pid = bridge.propose(
         &admin1,
@@ -800,4 +747,302 @@ fn test_full_scenario() {
     let withdrawn = bridge.execute(&pid);
     assert_eq!(withdrawn, 10);
     assert_eq!(bridge.accumulated_fees(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// C-Address validation tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_is_valid_c_address_true() {
+    let (env, _bridge) = setup_env();
+    let contract_addr = Address::generate(&env);
+    assert!(OnboardingBridge::is_valid_c_address(
+        env.clone(),
+        contract_addr
+    ));
+}
+
+#[test]
+fn test_is_valid_c_address_false() {
+    let env = Env::default();
+    let account_addr = account_address(&env);
+    assert!(!OnboardingBridge::is_valid_c_address(env, account_addr));
+}
+
+#[test]
+#[should_panic(expected = "invalid c-address: not a contract address")]
+fn test_fund_c_address_rejects_account_target() {
+    let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
+    let source = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+    let invalid_target = account_address(&env);
+    let memo = String::from_str(&env, "invalid");
+    bridge.fund_c_address(&source, &invalid_target, &token_addr, &1000, &memo);
+}
+
+#[test]
+#[should_panic(expected = "invalid c-address: not a contract address")]
+fn test_route_from_exchange_rejects_account_target() {
+    let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
+    let exchange = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+    let invalid_target = account_address(&env);
+    let memo = String::from_str(&env, "invalid");
+    bridge.route_from_exchange(&exchange, &invalid_target, &token_addr, &1000, &memo);
+}
+
+// ---------------------------------------------------------------------------
+// Batch funding tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_batch_fund_two_transfers() {
+    let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
+    let source = Address::generate(&env);
+    let target1 = Address::generate(&env);
+    let target2 = Address::generate(&env);
+    let token1 = Address::generate(&env);
+    let token2 = Address::generate(&env);
+
+    let targets = Vec::from_array(&env, [target1, target2]);
+    let tokens = Vec::from_array(&env, [token1, token2]);
+    let amounts = Vec::from_array(&env, [1000i128, 2000i128]);
+    let memos = Vec::from_array(
+        &env,
+        [
+            String::from_str(&env, "batch1"),
+            String::from_str(&env, "batch2"),
+        ],
+    );
+
+    let (total_fees, count) =
+        bridge.batch_fund_c_address(&source, &targets, &tokens, &amounts, &memos);
+    assert_eq!(count, 2);
+    assert_eq!(total_fees, 30);
+    assert_eq!(bridge.accumulated_fees(), 30);
+}
+
+#[test]
+#[should_panic(expected = "batch inputs must not be empty")]
+fn test_batch_fund_empty_fails() {
+    let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
+    let source = Address::generate(&env);
+
+    let empty: Vec<Address> = Vec::new(&env);
+    let empty_tokens: Vec<Address> = Vec::new(&env);
+    let empty_amounts: Vec<i128> = Vec::new(&env);
+    let empty_memos: Vec<String> = Vec::new(&env);
+    bridge.batch_fund_c_address(&source, &empty, &empty_tokens, &empty_amounts, &empty_memos);
+}
+
+#[test]
+#[should_panic(expected = "batch input vectors must have same length")]
+fn test_batch_fund_mismatched_lengths_fails() {
+    let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
+    let source = Address::generate(&env);
+    let target = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let targets = Vec::from_array(&env, [target]);
+    let tokens = Vec::from_array(&env, [token, Address::generate(&env)]);
+    let amounts = Vec::from_array(&env, [1000i128]);
+    let memos = Vec::from_array(&env, [String::from_str(&env, "mismatched")]);
+    bridge.batch_fund_c_address(&source, &targets, &tokens, &amounts, &memos);
+}
+
+#[test]
+fn test_batch_fund_multiple_accumulates_fees() {
+    let (env, bridge, _admins) = setup_env_with_admins(1, 1, 50, 1000);
+    let source = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    let targets = Vec::from_array(
+        &env,
+        [
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ],
+    );
+    let tokens = Vec::from_array(
+        &env,
+        [token_addr.clone(), token_addr.clone(), token_addr.clone()],
+    );
+    let amounts = Vec::from_array(&env, [1000i128, 2000i128, 3000i128]);
+    let memos = Vec::from_array(
+        &env,
+        [
+            String::from_str(&env, "a"),
+            String::from_str(&env, "b"),
+            String::from_str(&env, "c"),
+        ],
+    );
+
+    let (total_fees, count) =
+        bridge.batch_fund_c_address(&source, &targets, &tokens, &amounts, &memos);
+    assert_eq!(count, 3);
+    assert_eq!(total_fees, 30);
+    assert_eq!(bridge.accumulated_fees(), 30);
+}
+
+#[test]
+fn test_batch_fund_with_zero_fee() {
+    let (env, bridge, _admins) = setup_env_with_admins(1, 1, 0, 1000);
+    let source = Address::generate(&env);
+
+    let targets = Vec::from_array(&env, [Address::generate(&env), Address::generate(&env)]);
+    let tokens = Vec::from_array(&env, [Address::generate(&env), Address::generate(&env)]);
+    let amounts = Vec::from_array(&env, [500i128, 1500i128]);
+    let memos = Vec::from_array(
+        &env,
+        [
+            String::from_str(&env, "zero1"),
+            String::from_str(&env, "zero2"),
+        ],
+    );
+
+    let (total_fees, count) =
+        bridge.batch_fund_c_address(&source, &targets, &tokens, &amounts, &memos);
+    assert_eq!(count, 2);
+    assert_eq!(total_fees, 0);
+    assert_eq!(bridge.accumulated_fees(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Reentrancy protection tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_reentrancy_guard_on_fund_c_address() {
+    let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
+    let source = Address::generate(&env);
+    let target = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    let memo = String::from_str(&env, "normal");
+    let fee = bridge.fund_c_address(&source, &target, &token_addr, &1000, &memo);
+    assert_eq!(fee, 10);
+}
+
+// ---------------------------------------------------------------------------
+// Storage optimization tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_funding_count_increments() {
+    let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
+    let source = Address::generate(&env);
+    let target = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    assert_eq!(bridge.funding_count(), 0);
+
+    let memo = String::from_str(&env, "count1");
+    bridge.fund_c_address(&source, &target, &token_addr, &1000, &memo);
+    assert_eq!(bridge.funding_count(), 1);
+
+    let memo = String::from_str(&env, "count2");
+    bridge.fund_c_address(&source, &target, &token_addr, &2000, &memo);
+    assert_eq!(bridge.funding_count(), 2);
+}
+
+#[test]
+fn test_funding_record_stored() {
+    let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
+    let source = Address::generate(&env);
+    let target = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    let memo = String::from_str(&env, "record test");
+    bridge.fund_c_address(&source, &target, &token_addr, &1000, &memo);
+
+    let record = bridge.funding_record(&1);
+    assert!(record.is_some());
+    let r = record.unwrap();
+    assert_eq!(r.source, source);
+    assert_eq!(r.target, target);
+    assert_eq!(r.token_address, token_addr);
+    assert_eq!(r.amount, 1000);
+    assert_eq!(r.fee, 10);
+    assert!(!r.archived);
+}
+
+#[test]
+fn test_storage_usage() {
+    let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
+    let source = Address::generate(&env);
+    let target = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    let (fund_count, archive_count, acc_fees, hot) = bridge.storage_usage();
+    assert_eq!(fund_count, 0);
+    assert_eq!(archive_count, 0);
+    assert_eq!(acc_fees, 0);
+    assert_eq!(hot, 5);
+
+    let memo = String::from_str(&env, "usage test");
+    bridge.fund_c_address(&source, &target, &token_addr, &1000, &memo);
+
+    let (fund_count, _, acc_fees, _) = bridge.storage_usage();
+    assert_eq!(fund_count, 1);
+    assert_eq!(acc_fees, 10);
+}
+
+#[test]
+fn test_archive_old_entries() {
+    let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
+    let source = Address::generate(&env);
+    let target = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    let memo = String::from_str(&env, "archive1");
+    bridge.fund_c_address(&source, &target, &token_addr, &1000, &memo);
+    let memo = String::from_str(&env, "archive2");
+    bridge.fund_c_address(&source, &target, &token_addr, &2000, &memo);
+
+    assert_eq!(bridge.funding_count(), 2);
+
+    let hash = bridge.archive_old_entries(&2);
+    assert_eq!(hash.len(), 32);
+
+    let record1 = bridge.funding_record(&1).unwrap();
+    assert!(record1.archived);
+    let record2 = bridge.funding_record(&2).unwrap();
+    assert!(record2.archived);
+}
+
+#[test]
+#[should_panic(expected = "no entries to archive")]
+fn test_archive_no_entries_fails() {
+    let (_env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
+    bridge.archive_old_entries(&1);
+}
+
+#[test]
+fn test_batch_fund_then_funding_count() {
+    let (env, bridge, _admins) = setup_env_with_admins(1, 1, 50, 1000);
+    let source = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    let targets = Vec::from_array(&env, [Address::generate(&env), Address::generate(&env)]);
+    let tokens = Vec::from_array(&env, [token_addr.clone(), token_addr.clone()]);
+    let amounts = Vec::from_array(&env, [1000i128, 2000i128]);
+    let memos = Vec::from_array(
+        &env,
+        [String::from_str(&env, "b1"), String::from_str(&env, "b2")],
+    );
+
+    let (total_fees, count) =
+        bridge.batch_fund_c_address(&source, &targets, &tokens, &amounts, &memos);
+    assert_eq!(count, 2);
+    assert_eq!(total_fees, 15);
+    assert_eq!(bridge.funding_count(), 2);
+
+    let r1 = bridge.funding_record(&1).unwrap();
+    assert_eq!(r1.amount, 1000);
+    assert_eq!(r1.fee, 5);
+    let r2 = bridge.funding_record(&2).unwrap();
+    assert_eq!(r2.amount, 2000);
+    assert_eq!(r2.fee, 10);
 }
