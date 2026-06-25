@@ -22,6 +22,7 @@ pub enum DataKey {
     FeeBps,
     MaxFeeBps,
     AccumulatedFees,
+    /// Logical contract version (user-visible, incremented on each upgrade).
     Version,
     Paused,
     Admins,
@@ -176,9 +177,7 @@ impl OnboardingBridge {
             .instance()
             .set(&DataKey::MaxFeeBps, &max_fee_bps);
         env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
-        env.storage()
-            .instance()
-            .set(&DataKey::AccumulatedFees, &0i128);
+        env.storage().instance().set(&DataKey::AccumulatedFees, &0i128);
         env.storage().instance().set(&DataKey::Version, &1u32);
         env.storage().instance().set(&DataKey::FundingCount, &0u32);
         env.storage().instance().set(&DataKey::NextArchiveId, &0u32);
@@ -203,6 +202,10 @@ impl OnboardingBridge {
             ),
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Getters
+    // -----------------------------------------------------------------------
 
     pub fn version(env: Env) -> u32 {
         Self::extend_ttl(&env);

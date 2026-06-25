@@ -146,6 +146,25 @@ fn test_initialize_validates_threshold_exceeds() {
     bridge.initialize(&admins, &3, &50, &1000, &1, &i128::MAX);
 }
 
+// ---------------------------------------------------------------------------
+// Zero-amount guard
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_fund_zero_amount_rejected() {
+    let (env, bridge, _admin) = initialized();
+    let source = Address::generate(&env);
+    let target = Address::generate(&env);
+    let token = Address::generate(&env);
+    let memo = String::from_str(&env, "zero");
+
+    let err = bridge
+        .try_fund_c_address(&source, &target, &token, &0, &memo)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::ZeroAmount);
+}
+
 #[test]
 #[should_panic(expected = "admins must not be empty")]
 fn test_initialize_validates_admins_not_empty() {
@@ -663,6 +682,15 @@ fn test_multiple_fund_accumulates_fees() {
     let memo = String::from_str(&env, "tx1");
     bridge.fund_c_address(&source, &target, &token_addr, &1000, &memo);
     assert_eq!(bridge.accumulated_fees(), 10);
+    bridge.fund_c_address(&source, &target, &token, &2000, &String::from_str(&env, "t2")).unwrap();
+    assert_eq!(bridge.accumulated_fees(), 30);
+    bridge.fund_c_address(&source, &target, &token, &3000, &String::from_str(&env, "t3")).unwrap();
+    assert_eq!(bridge.accumulated_fees(), 60);
+}
+
+// ---------------------------------------------------------------------------
+// Schema version / migration
+// ---------------------------------------------------------------------------
 
     let memo = String::from_str(&env, "tx2");
     bridge.fund_c_address(&source, &target, &token_addr, &2000, &memo);
