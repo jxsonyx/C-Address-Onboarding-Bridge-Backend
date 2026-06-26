@@ -13,6 +13,8 @@ import {
   CexWithdrawalResult,
   PaginatedRequestParams,
   PaginatedResponse,
+  RequestParams,
+  FundingPrepareResult,
 } from './types';
 
 export interface BridgeClientConfig {
@@ -21,6 +23,7 @@ export interface BridgeClientConfig {
 }
 
 const REQUEST_TIMEOUT_MS = 30_000;
+type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
 export class BridgeClient {
   private baseUrl: string;
@@ -32,16 +35,18 @@ export class BridgeClient {
   }
 
   private async request<T>(
-    method: string,
+    method: HttpMethod,
     path: string,
     body?: Record<string, unknown>,
-    params?: Record<string, string | undefined>,
+    params?: RequestParams,
   ): Promise<T> {
     const url = new URL(`${this.baseUrl}${path}`);
     if (params) {
-      Object.entries(params).forEach(([key, val]) => {
-        if (val !== undefined) url.searchParams.set(key, val);
-      });
+      for (const [key, val] of Object.entries(params)) {
+        if (val !== undefined) {
+          url.searchParams.set(key, String(val));
+        }
+      }
     }
 
     const headers: Record<string, string> = {
@@ -61,8 +66,11 @@ export class BridgeClient {
       });
 
       if (!res.ok) {
-        const errBody = await res.json().catch(() => ({} as Record<string, string>));
-        throw new Error((errBody as { message?: string }).message || `request failed: ${res.statusText}`);
+        const errBody = await res.json().catch(() => ({} as Record<string, unknown>));
+        const errorMessage = typeof errBody === 'object' && errBody !== null && 'message' in errBody && typeof errBody.message === 'string'
+          ? errBody.message
+          : `request failed: ${res.statusText}`;
+        throw new Error(errorMessage);
       }
 
       return res.json() as Promise<T>;
@@ -72,7 +80,7 @@ export class BridgeClient {
   }
 
   async requestPaginated<T>(path: string, params?: PaginatedRequestParams): Promise<PaginatedResponse<T>> {
-    const queryParams: Record<string, string | undefined> = {};
+    const queryParams: RequestParams = {};
     if (params?.cursor !== undefined) queryParams['cursor'] = params.cursor;
     if (params?.limit !== undefined) queryParams['limit'] = String(params.limit);
     if (params?.offset !== undefined) queryParams['offset'] = String(params.offset);
@@ -93,12 +101,8 @@ export class BridgeClient {
     });
   }
 
-  async prepareFundingTransaction(params: FundParams): Promise<{
-    instruction: string;
-    simulation: Record<string, string>;
-    params: FundParams;
-  }> {
-    return this.request('POST', '/api/v1/fund/prepare', {
+  async prepareFundingTransaction(params: FundParams): Promise<FundingPrepareResult> {
+    return this.request<FundingPrepareResult>('POST', '/api/v1/fund/prepare', {
       sourceAddress: params.sourceAddress,
       targetAddress: params.targetAddress,
       tokenAddress: params.tokenAddress,
