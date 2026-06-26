@@ -62,6 +62,10 @@ export class BridgeClient {
     body?: Record<string, unknown>,
     params?: RequestParams,
   ): Promise<T> {
+    const timeoutMs = options?.timeout ?? this.defaultTimeout;
+    const startTime = Date.now();
+    this.metrics.totalRequests++;
+
     const url = new URL(`${this.baseUrl}${path}`);
     if (params) {
       for (const [key, val] of Object.entries(params)) {
@@ -71,9 +75,7 @@ export class BridgeClient {
       }
     }
 
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (this.apiKey) headers['X-API-Key'] = this.apiKey;
 
     let attempt = 0;
@@ -154,10 +156,14 @@ export class BridgeClient {
     }
   }
 
-  async submitSignedXdr(params: FundWithXdrParams): Promise<FundingResult> {
-    return this.request<FundingResult>('POST', '/api/v1/fund', {
-      signedXdr: params.signedXdr,
-    });
+  async submitSignedXdr(params: FundWithXdrParams, options?: RequestOptions): Promise<FundingResult> {
+    return this.request<FundingResult>(
+      'POST',
+      '/api/v1/fund',
+      { signedXdr: params.signedXdr },
+      undefined,
+      { timeout: this.fundSubmissionTimeout, ...options },
+    );
   }
 
   async prepareFundingTransaction(params: FundParams): Promise<FundingPrepareResult> {
@@ -189,12 +195,24 @@ export class BridgeClient {
     }
   }
 
-  async createMoonpayUrl(params: MoonpayWidgetParams): Promise<MoonpayWidgetResult> {
-    return this.request<MoonpayWidgetResult>('POST', '/api/v1/offramp/moonpay', params as unknown as Record<string, unknown>);
+  async createMoonpayUrl(params: MoonpayWidgetParams, options?: RequestOptions): Promise<MoonpayWidgetResult> {
+    return this.request<MoonpayWidgetResult>(
+      'POST',
+      '/api/v1/offramp/moonpay',
+      params as unknown as Record<string, unknown>,
+      undefined,
+      options,
+    );
   }
 
-  async createTransakUrl(params: TransakWidgetParams): Promise<TransakWidgetResult> {
-    return this.request<TransakWidgetResult>('POST', '/api/v1/offramp/transak', params as unknown as Record<string, unknown>);
+  async createTransakUrl(params: TransakWidgetParams, options?: RequestOptions): Promise<TransakWidgetResult> {
+    return this.request<TransakWidgetResult>(
+      'POST',
+      '/api/v1/offramp/transak',
+      params as unknown as Record<string, unknown>,
+      undefined,
+      options,
+    );
   }
 
   async health(): Promise<{ status: string }> {
