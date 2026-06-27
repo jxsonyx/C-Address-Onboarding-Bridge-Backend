@@ -1,6 +1,11 @@
 export type BridgeStatus = 'pending' | 'success' | 'failed';
 export type RequestValue = string | number | boolean | undefined;
 export type RequestParams = Record<string, RequestValue>;
+export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+
+export interface RequestOptions {
+  timeout?: number;
+}
 
 export interface QuoteParams {
   sourceAsset: string;
@@ -94,6 +99,18 @@ export interface BridgeClientConfig {
     jitterMs?: number;
     logger?: Pick<Console, 'debug'>;
   };
+  cache?: {
+    quoteTtlMs?: number;
+    statusTtlMs?: number;
+    healthTtlMs?: number;
+    staleWhileRevalidate?: boolean;
+    maxEntries?: number;
+  };
+  telemetry?: {
+    endpoint?: string;
+    enabled?: boolean;
+    intervalMs?: number;
+  };
 }
 
 export interface PaginatedRequestParams {
@@ -112,4 +129,78 @@ export interface FundingPrepareResult {
   instruction: string;
   simulation: Record<string, string>;
   params: FundParams;
+}
+
+// Pagination helpers
+
+export interface AutoPaginateOptions {
+  pageSize?: number;
+  throttleMs?: number;
+  concurrency?: number;
+  signal?: AbortSignal;
+}
+
+export type PageFetcher<T> = (params: PaginatedRequestParams) => Promise<PaginatedResponse<T>>;
+
+// Offline queue
+
+export interface StorageAdapter {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string): Promise<void>;
+  remove(key: string): Promise<void>;
+}
+
+export interface QueueEntry {
+  id: string;
+  timestamp: string;
+  retryCount: number;
+  method: HttpMethod;
+  path: string;
+  body?: Record<string, unknown>;
+  params?: Record<string, string | undefined>;
+}
+
+export interface OfflineQueueOptions {
+  maxSize?: number;
+  storageAdapter?: StorageAdapter;
+  healthCheckIntervalMs?: number;
+  autoQueue?: boolean;
+  healthCheckPath?: string;
+}
+
+// Event emitter
+
+export type BridgeEventType =
+  | 'transaction:pending'
+  | 'transaction:success'
+  | 'transaction:failed'
+  | 'transaction:status:changed'
+  | 'error'
+  | 'online'
+  | 'offline'
+  | 'reconnecting';
+
+export interface BridgeEventDataMap {
+  'transaction:pending': { txHash: string; status: TransactionStatus };
+  'transaction:success': { txHash: string; status: TransactionStatus };
+  'transaction:failed': { txHash: string; status: TransactionStatus; error?: string };
+  'transaction:status:changed': { txHash: string; status: TransactionStatus; previousStatus: string };
+  'error': { message: string; error: unknown };
+  'online': { at: string };
+  'offline': { at: string };
+  'reconnecting': { attempt: number; at: string };
+}
+
+export interface BridgeEvent<K extends BridgeEventType = BridgeEventType> {
+  type: K;
+  data: K extends keyof BridgeEventDataMap ? BridgeEventDataMap[K] : never;
+  timestamp: string;
+}
+
+export type EventHandler<K extends BridgeEventType = BridgeEventType> = (event: BridgeEvent<K>) => void;
+
+export interface EventEmitterOptions {
+  pollIntervalMs?: number;
+  historySize?: number;
+  healthCheckIntervalMs?: number;
 }

@@ -14,15 +14,25 @@ import {
   PaginatedRequestParams,
   PaginatedResponse,
   RequestParams,
+  RequestOptions,
   FundingPrepareResult,
+  HttpMethod,
 } from './types';
 import { SimpleCache } from './cache';
 import { TelemetryClient } from './telemetry';
 
 const REQUEST_TIMEOUT_MS = 30_000;
-type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+
+export type { BridgeClientConfig } from './types';
+import type { BridgeClientConfig } from './types';
 
 export class BridgeClient {
+  private readonly config: BridgeClientConfig;
+  private readonly cache: SimpleCache;
+  private readonly telemetry: TelemetryClient;
+  private readonly metrics = { totalRequests: 0 };
+  private readonly defaultTimeout: number;
+  private readonly fundSubmissionTimeout: number;
   private baseUrl: string;
   private apiKey?: string;
   private retryConfig: Required<NonNullable<BridgeClientConfig['retry']>>;
@@ -31,6 +41,10 @@ export class BridgeClient {
     this.config = config;
     this.baseUrl = config.baseUrl.replace(/\/+$/, '');
     this.apiKey = config.apiKey;
+    this.defaultTimeout = REQUEST_TIMEOUT_MS;
+    this.fundSubmissionTimeout = REQUEST_TIMEOUT_MS * 2;
+    this.cache = new SimpleCache({ maxEntries: config.cache?.maxEntries });
+    this.telemetry = new TelemetryClient(config.telemetry ?? {});
     this.retryConfig = {
       maxRetries: config.retry?.maxRetries ?? 3,
       baseDelayMs: config.retry?.baseDelayMs ?? 100,
@@ -56,14 +70,14 @@ export class BridgeClient {
     return Math.max(0, capped + jitter);
   }
 
-  private async request<T>(
+  protected async request<T>(
     method: HttpMethod,
     path: string,
     body?: Record<string, unknown>,
     params?: RequestParams,
+    options?: RequestOptions,
   ): Promise<T> {
     const timeoutMs = options?.timeout ?? this.defaultTimeout;
-    const startTime = Date.now();
     this.metrics.totalRequests++;
 
     const url = new URL(`${this.baseUrl}${path}`);
@@ -83,7 +97,7 @@ export class BridgeClient {
 
     while (true) {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
       try {
         const res = await fetch(url.toString(), {
@@ -122,7 +136,6 @@ export class BridgeClient {
 
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
-  }
   }
 
   async requestPaginated<T>(path: string, params?: PaginatedRequestParams): Promise<PaginatedResponse<T>> {
