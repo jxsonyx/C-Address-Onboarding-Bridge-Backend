@@ -1,4 +1,4 @@
-import { QueueEntry, OfflineQueueOptions, StorageAdapter, RequestOptions } from './types';
+import { QueueEntry, OfflineQueueOptions, StorageAdapter, RequestOptions, HttpMethod } from './types';
 import { BridgeClient, BridgeClientConfig } from './bridge';
 import { OfflineError, QueueFullError, TimeoutError } from './errors';
 
@@ -148,7 +148,7 @@ export class OfflineBridgeClient extends BridgeClient {
   }
 
   protected override async request<T>(
-    method: string,
+    method: HttpMethod,
     path: string,
     body?: Record<string, unknown>,
     params?: Record<string, string | undefined>,
