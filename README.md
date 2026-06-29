@@ -541,6 +541,10 @@ The blue-green flow deploys to the inactive environment, runs smoke tests, switc
 
 ---
 
+## Architecture Decision Records
+
+Architectural decisions are documented in [docs/adr/README.md](docs/adr/README.md). Use the ADR template at [docs/adr/template.md](docs/adr/template.md) for new proposals.
+
 ## Environment Variables
 
 | Variable | Required | Default | Description |
