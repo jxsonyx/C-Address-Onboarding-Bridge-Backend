@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { openApiSpec } from '../openapi/spec';
-import { assertApiReferenceFilesCurrent } from '../../scripts/generate-api-reference';
+import { assertApiReferenceFilesCurrent } from '../scripts/generate-api-reference';
 
 type PostmanItem = {
   request?: unknown;
@@ -21,7 +21,7 @@ describe('API reference package', () => {
   it('Postman collection has a request and response examples for every OpenAPI operation', async () => {
     const collection = await import('../../../docs/api-reference/c-address-bridge.postman_collection.json');
     const items = flattenItems(collection.default.item as PostmanItem[]);
-    const operationCount = Object.values(openApiSpec.paths).reduce(
+    const operationCount = Object.values(openApiSpec.paths ?? {}).reduce(
       (count, pathItem) => count + Object.keys(pathItem as Record<string, unknown>).length,
       0,
     );

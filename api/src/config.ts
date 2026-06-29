@@ -1,3 +1,7 @@
+import { initializeSecrets } from './secrets/manager';
+
+initializeSecrets();
+
 export class ConfigError extends Error {
   constructor(key: string) {
     super(`missing required config: ${key}`);

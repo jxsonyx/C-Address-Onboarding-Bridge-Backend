@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, resolve } from 'path';
-import { openApiSpec } from '../src/openapi/spec';
+import { openApiSpec } from '../openapi/spec';
 
 type Operation = {
   operationId?: string;
@@ -38,7 +38,7 @@ type PostmanItem = {
   }>;
 };
 
-const repoRoot = resolve(__dirname, '../..');
+const repoRoot = resolve(__dirname, '../../..');
 const outputDir = resolve(repoRoot, 'docs/api-reference');
 const openApiOutput = resolve(outputDir, 'openapi.json');
 const collectionOutput = resolve(outputDir, 'c-address-bridge.postman_collection.json');
@@ -179,7 +179,7 @@ function responsesFor(op: Operation, request: PostmanItem['request']): PostmanIt
 
 function collection() {
   const folders = new Map<string, { name: string; item: PostmanItem[] }>();
-  for (const [path, pathItem] of Object.entries(openApiSpec.paths)) {
+  for (const [path, pathItem] of Object.entries(openApiSpec.paths ?? {})) {
     for (const [method, op] of Object.entries(pathItem as Record<string, Operation>)) {
       const tag = op.tags?.[0] ?? 'API';
       const request = requestFor(method, path, op);
