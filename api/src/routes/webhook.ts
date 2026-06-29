@@ -1,26 +1,35 @@
 import { Router, Request, Response } from 'express';
+import { verifyMoonpayWebhook, verifyTransakWebhook } from '../middleware/webhookVerification';
+import { logger } from '../index';
+import { invalidateStatusCache } from './status';
 
 export const moonpayWebhookRouter = Router();
+export const transakWebhookRouter = Router();
 
-moonpayWebhookRouter.post('/', (req: Request, res: Response) => {
-  const signature = req.headers['x-moonpay-signature'] as string | undefined;
-  if (!signature) {
-    res.status(400).json({ error: 'missing signature header' });
-    return;
-  }
-
-  const payload = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
-
+moonpayWebhookRouter.post('/', verifyMoonpayWebhook, async (req: Request, res: Response) => {
   try {
-    const { moonpayService } = require('../services/moonpay');
-    const isValid = moonpayService.verifyWebhookSignature(payload, signature);
-    if (!isValid) {
-      res.status(401).json({ error: 'invalid signature' });
-      return;
+    logger.info({ path: req.path }, 'moonpay webhook received and verified');
+    const body = req.body ? JSON.parse(req.body as string) : {};
+    if (body?.data?.id) {
+      await invalidateStatusCache(body.data.id);
     }
     res.json({ status: 'ok' });
   } catch (err) {
-    console.error('webhook processing error:', err);
+    logger.error({ err }, 'moonpay webhook processing error');
+    res.status(500).json({ error: 'internal_error' });
+  }
+});
+
+transakWebhookRouter.post('/', verifyTransakWebhook, async (req: Request, res: Response) => {
+  try {
+    logger.info({ path: req.path }, 'transak webhook received and verified');
+    const body = req.body ? JSON.parse(req.body as string) : {};
+    if (body?.data?.id) {
+      await invalidateStatusCache(body.data.id);
+    }
+    res.json({ status: 'ok' });
+  } catch (err) {
+    logger.error({ err }, 'transak webhook processing error');
     res.status(500).json({ error: 'internal_error' });
   }
 });
